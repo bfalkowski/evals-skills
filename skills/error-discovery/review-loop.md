@@ -22,7 +22,7 @@ Tell the user what you are doing at each step during the review loop. When you c
 2. Open the app in the browser.
 3. Tell the user the app is ready. Explain the interaction briefly.
 4. **Monitor the annotations file.** Watch `error_discovery_data/annotations.json` for new or deleted annotations by comparing content every 2 seconds.
-   - Claude Code: use the Monitor tool with `persistent: true`. Each detected change becomes a notification, so you react in real time.
+   - Claude Code: use the Monitor tool with a read-compare loop that also reports if the server stops responding. Each detected change becomes a notification, so you react in real time. Monitors expire, so re-arm yours each time it does, and check that no annotations changed in the gap.
    - Everything else: write a polling script, run it in the background with output appended to a log file, and read the new lines whenever you take a turn.
 
    Tell the user how you are watching for annotations. Do not use `inotifywait` or filesystem events — poll with a simple read-compare loop for cross-platform reliability.
@@ -36,19 +36,27 @@ When new annotations appear:
 4. Push the updated taxonomy to `POST /api/patterns`.
 5. Track which records have been reviewed and which clusters or dimensions are covered.
 
+Read the passage around each note before categorizing it. Tell the human when you merge or rename a mode, and ask when a note looks cut off or could mean two things. Build each mode only from the human's notes, and offer to split any merge they disagree with.
+
+The human should be able to tell the state of the session from the app alone. When a change needs a page reload, say so. When work is running in the background, say what it is and where its results will appear.
+
 ## Depth mode: scan for failure mode instances
 
 Wait until the human has annotated about 5 distinct records before the first corpus-wide scan; early annotations are too weak a signal of what the human considers a failure. Never scan before the human has reviewed anything. After that, when you discover a new failure mode (or an existing one becomes clearer), scan **all** records for instances. Include both reviewed and unreviewed records.
 
-**Spawn one background subagent per failure mode.** Give the subagent the mode name, description, and example quotes. It reads through all records and returns a list of suggested annotations: `{record_id, text, start, end}`. One mode = one subagent, not one per record. Multiple modes can run in parallel. This happens in the background while the human keeps reviewing.
+**Spawn one background subagent per failure mode.** Give the subagent the mode name, description, example quotes, the human's notes, and what falls outside the mode. It reads through all records and returns a list of suggested annotations: `{record_id, block, text, start, end, why, confidence}`. One mode = one subagent, not one per record. Multiple modes can run in parallel. This happens in the background while the human keeps reviewing.
 
-When subagents return, merge their suggestions and push to `POST /api/suggestions`. The UI polls for new suggestions automatically and shows them in the Progress view queue and as purple highlights in the article view.
+For a corpus too large to read once per mode, first extract candidate passages per mode with a broad filter, and give each subagent those plus the preceding user message. Tell the human this scan covers filtered candidates, because real instances outside the filter can be missed. Tighten a filter that matches most of the corpus by keying on what the human's notes actually flagged.
+
+Publish each subagent's results as soon as it returns, and tell the human, so the app never sits empty while results exist. Check that every quote occurs verbatim in its record before pushing to `POST /api/suggestions`, and skip passages the human has already annotated. Merge with the current queue, so accepted and dismissed suggestions stay resolved. The UI polls for new suggestions automatically and shows them in the Progress view queue and as purple highlights in the article view.
+
+Keep the queue reviewable: list every match in records already in the sample, plus the strongest few per mode from outside it. Save the full set of matches inside `error_discovery_data/`, so it outlives the session, and report the listed and total counts. A mode created after a scan started goes in the next round.
 
 There are two kinds of suggestions:
 1. **Already-reviewed records**: the reviewer may have missed an instance because the mode was not yet in their head when they read the record (criteria drift).
-2. **Unreviewed records**: new coverage. Add these records to the sample if they are not already in it.
+2. **Unreviewed records**: new coverage. Add the strongest few per mode to the sample, so the human can open them, and say that the sample grew and why.
 
-Agent suggestions are not ground truth. The human accepts or dismisses each one. Favor recall over precision. Dismissing a false positive is quick. Missing a real instance is costly.
+Agent suggestions are not ground truth. The human accepts or dismisses each one. Favor recall over precision. Dismissing a false positive is quick. Missing a real instance is costly. Flag modes where policy may require the flagged behavior, and report unreviewed matches as unconfirmed counts, because they do not measure how common a failure is.
 
 ## Breadth mode: propose new samples
 

@@ -30,6 +30,7 @@ Load the file. Examine 5 to 10 records across the distribution. For each record,
 - Which fields are the primary content the human needs to judge
 - Which fields are metadata (context for understanding, but not the thing being judged)
 - Which fields vary across records and which are constant
+- Which fields reveal the answer, e.g., pass/fail, score, reward, expected output. Keep these answer fields collapsed in the review interface so the reviewer forms a view first, and leave them out of clustering features. A passing score can still hide a failure, and a failing score can come from a bad test case.
 
 ### 1b: Identify the content structure
 
@@ -130,6 +131,8 @@ Structural outlier flags. Show in the header only, not inline.
 - On-disk files in an `error_discovery_data/` directory:
   - `samples.json`, `annotations.json`, `graph.json`, `patterns.json`, `suggestions.json`
 - The HTML app auto-saves to the server on every annotation. It polls for new samples and suggestions.
+- Give each record a stable ID that names its source from the start, e.g., `retail-task43-trial1`, because task numbers often repeat across sources and annotations refer to these IDs.
+- Check before overwriting state. Back up `error_discovery_data/` before resampling, and keep every already-annotated record in the new sample.
 
 ### HTML app structure
 
@@ -139,11 +142,14 @@ Three views, toggled from the top bar:
 2. Map view. A 2D scatter plot (PCA or UMAP projection) of all records. It shows clusters, which items are in the sample, and which have been annotated. The reviewer can click a sample node to go to its content view.
 3. Progress view. Two sections:
    - Failure modes: a treemap of modes the agent has categorized so far. Each block is a failure mode, sized by annotation count. Inside each block, list the notes. The reviewer can click a note to go to that annotation in the content view.
-   - Agent suggestions to review: a list of pending suggestions with checkboxes. Each row shows the failure mode, quoted text, and source record. The reviewer can click the text to go to that spot in the article. At the top, a "Select all" checkbox and "Accept selected" / "Dismiss selected" buttons. This lets the reviewer select all, uncheck the few they disagree with, and accept the rest in one click.
+   - Agent suggestions to review: a list of pending suggestions. Each row shows the failure mode, quoted text, why it was suggested, source record, and its own Accept and Dismiss buttons. The reviewer can click the text to go to that spot in the article. Add a checkbox per row, with a "Select all" checkbox and "Accept selected (n)" / "Dismiss selected (n)" buttons at the top. Rows start unselected, the bulk buttons stay disabled until something is selected, and the selection survives polling.
+   - Instructions: above the list, state in plain language what suggestions are, that they are guesses, and what clicking, accepting, dismissing, and selecting each do. When the list is empty, say why and what will fill it, including how many records the reviewer has annotated against the threshold in [review-loop.md](review-loop.md).
 
 Content view design. Apply the visual encoding from Phase 2:
 
-- Header: title + label + topic. Keep it minimal. Add structural outlier flags (from Phase 2) only when the record is a genuine outlier.
+- Sidebar: a searchable list of every record in the sample, so the reviewer can browse and jump. Each row shows the record's label, its length, a note count, and a preview of the first message. Leave answer fields out of the rows.
+- Header: a readable record label, e.g., `retail #43 · t1`, plus non-answer metadata. Report length in the unit a reader counts, e.g., turns instead of raw messages. Put answer fields in collapsed sections labeled so the reviewer knows to open them after forming a view. Add structural outlier flags (from Phase 2) only when the record is a genuine outlier.
+- Navigation: left and right arrow keys move between records, and up and down keep scrolling the page. For multi-turn traces, add a numbered heading at each turn and a row of chips that jump to a turn, highlighting turns that have notes.
 - Body: render the primary content using the appropriate treatment per content type.
 
   For multi-turn traces (agent logs, conversations, chat):
@@ -157,7 +163,7 @@ Content view design. Apply the visual encoding from Phase 2:
   - Group related turns: a thinking block + the tool call it produces + the tool result, visually grouped with tight spacing and a shared container.
 
   For single text content (articles, summaries, etc.):
-  - Render markdown as formatted HTML (use marked.js or similar).
+  - Render markdown as formatted HTML (use marked.js or similar). Escape raw HTML in model output so it displays as text.
   - Render plain text with paragraph breaks.
 
   For code / diffs:
@@ -170,14 +176,16 @@ Content view design. Apply the visual encoding from Phase 2:
   - Label each section.
 
 - Inline annotation: the reviewer selects text, a floating popover appears with a text input, they press Enter to save, and the span is highlighted. When the popover appears and the input is focused, the browser clears the native text selection. To prevent this, wrap the selected range in a temporary highlight span (e.g., class "pending-highlight" with a visible background) BEFORE focusing the input. Remove the temporary highlight when the annotation is saved, cancelled, or the popover is dismissed by clicking outside. This way the reviewer always sees what text they are annotating.
+- Highlight by wrapping each text node inside the span, one wrapper per node, so formatting inside the block survives and a selection can cross bold or code text. Keep real newlines in rendered prose (with `white-space: pre-wrap`) rather than `<br>`, so a selected quote matches the block's `textContent`. Store the block index and character offset with each quote, and open any collapsed section that contains a highlight.
 - Margin notes: annotations and suggestions must appear as side notes in a right margin column, aligned vertically with their corresponding highlighted text. Use a two-column layout: the article body on the left (flex: 1, max-width ~720px) and a margin-notes column on the right (width ~240px). Each margin note is position: absolute inside the margin column, with its top offset calculated from the highlight element's position relative to the margin container (use getBoundingClientRect on both the highlight and the margin container, take the difference — do NOT add scrollTop, as that double-counts the scroll offset). Stack notes with a minimum gap so they do not overlap. Include hover linking: hovering a margin note outlines its highlight, and hovering a highlight outlines its margin note. Each margin note shows the quoted text, the reviewer's note, and edit/delete buttons (visible on hover). Do NOT use hover tooltips as the primary way to show annotation content — margin notes replace tooltips.
-- Agent suggestions: visually distinct from human annotations in both the inline highlight (dashed border, muted tint) and the margin note (different left-border color, an "agent suggestion" tag). The margin note shows accept/dismiss buttons (always visible, not hover-gated). The reviewer can accept (which promotes it to an annotation) or dismiss.
+- Agent suggestions: visually distinct from human annotations in both the inline highlight (dashed border, muted tint) and the margin note (different left-border color, an "agent suggestion" tag). The margin note shows accept/dismiss buttons (always visible, not hover-gated). The reviewer can accept (which promotes it to an annotation) or dismiss. An accepted suggestion stays marked as agent-written, so the reviewer's own words remain distinguishable.
 - No quality labels, no dropdowns, no structured forms. Free-text notes only.
-- Auto-save to server on every change. Keep a localStorage backup.
-- Poll for new samples and suggestions periodically. Show a banner or toast when new ones arrive.
+- Auto-save to server on every change. Keep a localStorage backup. Show a visible error if a save fails.
+- Poll for new samples, suggestions, and patterns periodically. Show a banner or toast when new ones arrive. Compare full content rather than counts, so a renamed or merged failure mode appears. Rebuild a trace only when its own highlights or notes change, and hold off while a note is being written or edited, so expanded sections and pending highlights survive. Track deleted annotation IDs so a poll cannot restore them.
 
 Map view:
 - 2D scatter of all records from PCA/UMAP projection.
+- Name every cluster for what happens in its conversations, based on its feature statistics, e.g., "Retail: exchanges and item changes". Show the names in a legend with each cluster's size and sampled count, and in tooltips and sampling reasons. Clusters describe activity, so keep failure language out of the names.
 - Color by cluster (match hull colors), not by label.
 - Use shape to distinguish categories, e.g., circles for AI and squares for human.
 - Show sample items as larger nodes with a dark border.
@@ -185,6 +193,19 @@ Map view:
 - Draw cluster hulls or convex boundaries as subtle background shapes.
 - On hover, show a tooltip with title, metadata, and annotation count.
 - On click (sample nodes only), go to the content view for that item.
+
+### Test before handing over
+
+Drive the app in a real browser with Playwright against a temporary copy of `error_discovery_data/`, keeping test notes out of the real session. The test passes when each of these works, and you have checked screenshots yourself:
+
+- Selecting text with the mouse, including across bold text, then saving, reloading, editing, and deleting a note
+- A pending highlight and an expanded section both surviving a poll
+- A margin note aligning with its highlight, with the page scrolled
+- Accepting and dismissing one suggestion, and bulk actions touching only selected rows
+- Clicking a map node, and pushing new samples while a trace is open
+- A record whose text contains raw HTML rendering it as inert text
+
+Report the actual results to the user.
 
 ## Phase 4: Cluster and select initial samples
 
